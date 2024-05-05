@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 import asyncio
 import sqlite3
 import uuid
@@ -6,12 +5,17 @@ from datetime import datetime, timezone
 from typing import TypedDict
 
 from fake_useragent import UserAgent
+from httpx import HTTPStatusError
 
 from .account import Account
 from .db import execute, fetchall, fetchone
 from .logger import logger
-from .login import login
-from .utils import parse_cookies, utc
+from .login import LoginConfig, login
+from .utils import get_env_bool, parse_cookies, utc
+
+
+class NoAccountError(Exception):
+    pass
 
 
 class AccountInfo(TypedDict):
@@ -32,8 +36,15 @@ class AccountsPool:
     # _order_by: str = "RANDOM()"
     _order_by: str = "username"
 
-    def __init__(self, db_file="database.db"):
+    def __init__(
+        self,
+        db_file="accounts.db",
+        login_config: LoginConfig | None = None,
+        raise_when_no_account=False,
+    ):
         self._db_file = db_file
+        self._login_config = login_config or LoginConfig()
+        self._raise_when_no_account = raise_when_no_account
 
     async def load_from_file(self, filepath: str, line_format: str):
         line_delim = guess_delim(line_format)
@@ -61,14 +72,15 @@ class AccountsPool:
             await self.add_account(**x)
 
     async def add_account(
-            self,
-            username: str,
-            password: str,
-            email: str,
-            email_password: str,
-            user_agent: str | None = None,
-            proxy: str | None = None,
-            cookies: str | None = None,
+        self,
+        username: str,
+        password: str,
+        email: str,
+        email_password: str,
+        user_agent: str | None = None,
+        proxy: str | None = None,
+        cookies: str | None = None,
+        mfa_code: str | None = None,
     ):
         qs = "SELECT * FROM accounts WHERE username = :username"
         rs = await fetchone(self._db_file, qs, {"username": username})
@@ -88,6 +100,7 @@ class AccountsPool:
             headers={},
             cookies=parse_cookies(cookies) if cookies else {},
             proxy=proxy,
+            mfa_code=mfa_code,
         )
 
         if "ct0" in account.cookies:
@@ -122,6 +135,13 @@ class AccountsPool:
         rs = await fetchall(self._db_file, qs)
         return [Account.from_rs(x) for x in rs]
 
+    async def get_account(self, username: str):
+        qs = "SELECT * FROM accounts WHERE username = :username"
+        rs = await fetchone(self._db_file, qs, {"username": username})
+        if not rs:
+            return None
+        return Account.from_rs(rs)
+
     async def save(self, account: Account):
         data = account.to_rs()
         cols = list(data.keys())
@@ -132,32 +152,40 @@ class AccountsPool:
         """
         await execute(self._db_file, qs, data)
 
-    async def login(self, account: Account, email_first: bool = False):
+    async def login(self, account: Account):
         try:
-            await login(account, email_first=email_first)
+            await login(account, cfg=self._login_config)
             logger.info(f"Logged in to {account.username} successfully")
             return True
+        except HTTPStatusError as e:
+            rep = e.response
+            logger.error(f"Failed to login '{account.username}': {rep.status_code} - {rep.text}")
+            return False
         except Exception as e:
-            logger.error(f"Error logging in to {account.username}: {e}")
+            logger.error(f"Failed to login '{account.username}': {e}")
             return False
         finally:
             await self.save(account)
 
-    async def login_all(self, email_first=False):
-        qs = "SELECT * FROM accounts WHERE active = false AND error_msg IS NULL"
-        rs = await fetchall(self._db_file, qs)
+    async def login_all(self, usernames: list[str] | None = None):
+        if usernames is None:
+            qs = "SELECT * FROM accounts WHERE active = false AND error_msg IS NULL"
+        else:
+            us = ",".join([f'"{x}"' for x in usernames])
+            qs = f"SELECT * FROM accounts WHERE username IN ({us})"
 
+        rs = await fetchall(self._db_file, qs)
         accounts = [Account.from_rs(rs) for rs in rs]
         # await asyncio.gather(*[login(x) for x in self.accounts])
 
         counter = {"total": len(accounts), "success": 0, "failed": 0}
         for i, x in enumerate(accounts, start=1):
             logger.info(f"[{i}/{len(accounts)}] Logging in {x.username} - {x.email}")
-            status = await self.login(x, email_first=email_first)
+            status = await self.login(x)
             counter["success" if status else "failed"] += 1
         return counter
 
-    async def relogin(self, usernames: str | list[str], email_first=False):
+    async def relogin(self, usernames: str | list[str]):
         usernames = usernames if isinstance(usernames, list) else [usernames]
         usernames = list(set(usernames))
         if not usernames:
@@ -177,12 +205,12 @@ class AccountsPool:
         """
 
         await execute(self._db_file, qs)
-        await self.login_all(email_first=email_first)
+        await self.login_all(usernames)
 
-    async def relogin_failed(self, email_first=False):
+    async def relogin_failed(self):
         qs = "SELECT username FROM accounts WHERE active = false AND error_msg IS NOT NULL"
         rs = await fetchall(self._db_file, qs)
-        await self.relogin([x["username"] for x in rs], email_first=email_first)
+        await self.relogin([x["username"] for x in rs])
 
     async def reset_locks(self):
         qs = "UPDATE accounts SET locks = json_object()"
@@ -212,24 +240,16 @@ class AccountsPool:
         """
         await execute(self._db_file, qs, {"username": username})
 
-    async def get_for_queue(self, queue: str):
-        q1 = f"""
-        SELECT username FROM accounts
-        WHERE active = true AND (
-            locks IS NULL
-            OR json_extract(locks, '$.{queue}') IS NULL
-            OR json_extract(locks, '$.{queue}') < datetime('now')
-        )
-        ORDER BY {self._order_by}
-        LIMIT 1
-        """
+    async def _get_and_lock(self, queue: str, condition: str):
+        # if space in condition, it's a subquery, otherwise it's username
+        condition = f"({condition})" if " " in condition else f"'{condition}'"
 
         if int(sqlite3.sqlite_version_info[1]) >= 35:
             qs = f"""
             UPDATE accounts SET
                 locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
                 last_used = datetime({utc.ts()}, 'unixepoch')
-            WHERE username = ({q1})
+            WHERE username = {condition}
             RETURNING *
             """
             rs = await fetchone(self._db_file, qs)
@@ -240,7 +260,7 @@ class AccountsPool:
                 locks = json_set(locks, '$.{queue}', datetime('now', '+15 minutes')),
                 last_used = datetime({utc.ts()}, 'unixepoch'),
                 _tx = '{tx}'
-            WHERE username = ({q1})
+            WHERE username = {condition}
             """
             await execute(self._db_file, qs)
 
@@ -249,21 +269,43 @@ class AccountsPool:
 
         return Account.from_rs(rs) if rs else None
 
-    async def get_for_queue_or_wait(self, queue: str) -> Account:
+    async def get_for_queue(self, queue: str):
+        q = f"""
+        SELECT username FROM accounts
+        WHERE active = true AND (
+            locks IS NULL
+            OR json_extract(locks, '$.{queue}') IS NULL
+            OR json_extract(locks, '$.{queue}') < datetime('now')
+        )
+        ORDER BY {self._order_by}
+        LIMIT 1
+        """
+
+        return await self._get_and_lock(queue, q)
+
+    async def get_for_queue_or_wait(self, queue: str) -> Account | None:
         msg_shown = False
         while True:
             account = await self.get_for_queue(queue)
             if not account:
+                if self._raise_when_no_account or get_env_bool("TWS_RAISE_WHEN_NO_ACCOUNT"):
+                    raise NoAccountError(f"No account available for queue {queue}")
+
                 if not msg_shown:
                     nat = await self.next_available_at(queue)
+                    if not nat:
+                        logger.warning("No active accounts. Stopping...")
+                        return None
+
                     msg = f'No account available for queue "{queue}". Next available at {nat}'
                     logger.info(msg)
                     msg_shown = True
+
                 await asyncio.sleep(5)
                 continue
             else:
                 if msg_shown:
-                    logger.info(f"Account available for queue {queue}")
+                    logger.info(f"Continuing with account {account.username} on queue {queue}")
 
             return account
 
@@ -284,9 +326,9 @@ class AccountsPool:
             at_local = datetime.now() + (trg - now)
             return at_local.strftime("%H:%M:%S")
 
-        return "none"
+        return None
 
-    async def mark_banned(self, username: str, error_msg: str):
+    async def mark_inactive(self, username: str, error_msg: str | None):
         qs = """
         UPDATE accounts SET active = false, error_msg = :error_msg
         WHERE username = :username

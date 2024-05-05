@@ -12,6 +12,7 @@ import httpx
 from .api import API, AccountsPool
 from .db import get_sqlite_version
 from .logger import logger, set_log_level
+from .login import LoginConfig
 from .models import Tweet, User
 from .utils import print_table
 
@@ -49,11 +50,12 @@ async def main(args):
         print(f"SQLite runtime: {sqlite3.sqlite_version} ({await get_sqlite_version()})")
         return
 
-    pool = AccountsPool(args.db)
+    login_config = LoginConfig(getattr(args, "email_first", False), getattr(args, "manual", False))
+    pool = AccountsPool(args.db, login_config=login_config)
     api = API(pool, debug=args.debug)
 
     if args.command == "accounts":
-        print_table(await pool.accounts_info())
+        print_table([dict(x) for x in await pool.accounts_info()])
         return
 
     if args.command == "stats":
@@ -73,6 +75,7 @@ async def main(args):
 
     if args.command == "add_accounts":
         await pool.load_from_file(args.file_path, args.line_format)
+        print("\nNow run:\ntwscrape login_accounts")
         return
 
     if args.command == "del_accounts":
@@ -80,16 +83,16 @@ async def main(args):
         return
 
     if args.command == "login_accounts":
-        stats = await pool.login_all(email_first=args.email_first)
+        stats = await pool.login_all()
         print(stats)
         return
 
     if args.command == "relogin_failed":
-        await pool.relogin_failed(email_first=args.email_first)
+        await pool.relogin_failed()
         return
 
     if args.command == "relogin":
-        await pool.relogin(args.usernames, email_first=args.email_first)
+        await pool.relogin(args.usernames)
         return
 
     if args.command == "reset_locks":
@@ -170,27 +173,37 @@ def run():
     relogin.add_argument("usernames", nargs="+", default=[], help="Usernames to re-login")
     re_failed = subparsers.add_parser("relogin_failed", help="Retry login for failed accounts")
 
-    check_email = [login_cmd, relogin, re_failed]
-    for cmd in check_email:
+    login_commands = [login_cmd, relogin, re_failed]
+    for cmd in login_commands:
         cmd.add_argument("--email-first", action="store_true", help="Check email first")
+        cmd.add_argument("--manual", action="store_true", help="Enter email code manually")
 
     subparsers.add_parser("reset_locks", help="Reset all locks")
     subparsers.add_parser("delete_inactive", help="Delete inactive accounts")
 
     c_lim("search", "Search for tweets", "query", "Search query")
     c_one("tweet_details", "Get tweet details", "tweet_id", "Tweet ID", int)
+    c_lim("tweet_replies", "Get replies  of a tweet", "tweet_id", "Tweet ID", int)
     c_lim("retweeters", "Get retweeters of a tweet", "tweet_id", "Tweet ID", int)
     c_lim("favoriters", "Get favoriters of a tweet", "tweet_id", "Tweet ID", int)
     c_one("user_by_id", "Get user data by ID", "user_id", "User ID", int)
     c_one("user_by_login", "Get user data by username", "username", "Username")
-    c_lim("followers", "Get user followers", "user_id", "User ID", int)
     c_lim("following", "Get user following", "user_id", "User ID", int)
+    c_lim("followers", "Get user followers", "user_id", "User ID", int)
+    # https://twitter.com/xDaily/status/1701694747767648500
+    c_lim("verified_followers", "Get user verified followers", "user_id", "User ID", int)
+    c_lim("subscriptions", "Get user subscriptions", "user_id", "User ID", int)
     c_lim("user_tweets", "Get user tweets", "user_id", "User ID", int)
     c_lim("user_tweets_and_replies", "Get user tweets and replies", "user_id", "User ID", int)
+    c_lim("user_media", "Get user's media", "user_id", "User ID", int)
     c_lim("list_timeline", "Get tweets from list", "list_id", "List ID", int)
+    c_lim("liked_tweets", "Get user's liked tweets", "user_id", "User ID", int)
 
     args = p.parse_args()
     if args.command is None:
         return custom_help(p)
 
-    asyncio.run(main(args))
+    try:
+        asyncio.run(main(args))
+    except KeyboardInterrupt:
+        pass

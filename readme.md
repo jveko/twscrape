@@ -1,27 +1,19 @@
 # twscrape
 
-<div align="center" style="padding-bottom: 8px">
-  <a href="https://pypi.org/project/twscrape">
-    <img src="https://badgen.net/pypi/v/twscrape" alt="version" />
-  </a>
-  <a href="https://pypi.org/project/twscrape">
-    <img src="https://badgen.net/pypi/python/twscrape" alt="python versions" />
-  </a>
-  <a href="https://github.com/vladkens/twscrape/actions">
-    <img src="https://github.com/vladkens/twscrape/workflows/test/badge.svg" alt="test status" />
-  </a>
-  <a href="https://pypi.org/project/twscrape">
-    <img src="https://badgen.net/pypi/dm/twscrape" alt="downloads" />
-  </a>
-  <a href="https://github.com/vladkens/twscrape/blob/main/LICENSE">
-    <img src="https://badgen.net/github/license/vladkens/twscrape" alt="license" />
-  </a>
+<div align="center">
+
+[<img src="https://badgen.net/pypi/v/twscrape" alt="version" />](https://pypi.org/project/twscrape)
+[<img src="https://badgen.net/pypi/python/twscrape" alt="py versions" />](https://pypi.org/project/twscrape)
+[<img src="https://badgen.net/pypi/dm/twscrape" alt="downloads" />](https://pypi.org/project/twscrape)
+[<img src="https://badgen.net/github/license/vladkens/twscrape" alt="license" />](https://github.com/vladkens/twscrape/blob/main/LICENSE)
+[<img src="https://badgen.net/static/-/buy%20me%20a%20coffee/ff813f?icon=buymeacoffee&label" alt="donate" />](https://buymeacoffee.com/vladkens)
+
 </div>
 
 Twitter GraphQL API implementation with [SNScrape](https://github.com/JustAnotherArchivist/snscrape) data models.
 
 <div align="center">
-  <img src="https://miro.medium.com/v2/resize:fit:1400/format:webp/1*0erkeMBhl_qqRofIeU5jMQ.png" alt="example of cli usage" width="560px">
+  <img src=".github/example.png" alt="example of cli usage" height="400px">
 </div>
 
 ## Install
@@ -57,22 +49,17 @@ import asyncio
 from twscrape import API, gather
 from twscrape.logger import set_log_level
 
-
 async def main():
     api = API()  # or API("path-to.db") - default is `accounts.db`
 
     # ADD ACCOUNTS (for CLI usage see BELOW)
-    await api.accounts_pool.add_account("user1", "pass1", "u1@example.com", "mail_pass1")
-    await api.accounts_pool.add_account("user2", "pass2", "u2@example.com", "mail_pass2")
-    await api.accounts_pool.login_all()
+    await api.pool.add_account("user1", "pass1", "u1@example.com", "mail_pass1")
+    await api.pool.add_account("user2", "pass2", "u2@example.com", "mail_pass2")
+    await api.pool.login_all()
 
     # or add account with COOKIES (with cookies login not required)
     cookies = "abc=12; ct0=xyz"  # or '{"abc": "12", "ct0": "xyz"}'
-    await api.accounts_pool.add_account("user3", "pass3", "u3@mail.com", "mail_pass3", cookies=cookies)
-
-    # add account with PROXY
-    proxy = "http://login:pass@example.com:8080"
-    await api.accounts_pool.add_account("user4", "pass4", "u4@mail.com", "mail_pass4", proxy=proxy)
+    await api.pool.add_account("user3", "pass3", "u3@mail.com", "mail_pass3", cookies=cookies)
 
     # API USAGE
 
@@ -87,6 +74,9 @@ async def main():
     await gather(api.retweeters(tweet_id, limit=20))  # list[User]
     await gather(api.favoriters(tweet_id, limit=20))  # list[User]
 
+    # Note: this method have small pagination from X side, like 5 tweets per query
+    await gather(api.tweet_replies(tweet_id, limit=20))  # list[Tweet]
+
     # get user by login
     user_login = "xdevelopers"
     await api.user_by_login(user_login)  # User
@@ -94,10 +84,13 @@ async def main():
     # user info
     user_id = 2244994945
     await api.user_by_id(user_id)  # User
-    await gather(api.followers(user_id, limit=20))  # list[User]
     await gather(api.following(user_id, limit=20))  # list[User]
+    await gather(api.followers(user_id, limit=20))  # list[User]
+    await gather(api.verified_followers(user_id, limit=20))  # list[User]
+    await gather(api.subscriptions(user_id, limit=20))  # list[User]
     await gather(api.user_tweets(user_id, limit=20))  # list[Tweet]
     await gather(api.user_tweets_and_replies(user_id, limit=20))  # list[Tweet]
+    await gather(api.liked_tweets(user_id, limit=20))  # list[Tweet]
 
     # list info
     list_id = 123456789
@@ -118,7 +111,6 @@ async def main():
     doc = await api.user_by_id(user_id)  # User
     doc.dict()  # -> python dict
     doc.json()  # -> json string
-
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -149,36 +141,59 @@ twscrape
 twscrape search --help
 ```
 
-### Add accounts & login
+### Add accounts
 
-First add accounts from file:
-
+To add accounts use `add_accounts` command. Command syntax is:
 ```sh
-# twscrape add_accounts <file_path> <line_format>
-# line_format should have "username", "password", "email", "email_password" tokens
-# note: tokens delimeter should be same as an file
-twscrape add_accounts ./accounts.txt username:password:email:email_password
+twscrape add_accounts <file_path> <line_format>
 ```
 
-Then call login:
+Where:
+`<line_format>` is format of line if accounts file splited by delimeter. Possible tokens:
+- `username` – required
+- `password` – required
+- `email` – required
+- `email_password` – to receive email code (you can use `--manual` mode to get code)
+- `cookies` – can be any parsable format (string, json, base64 string, etc)
+- `_` – skip column from parse
+
+Tokens should be splited by delimeter, usually "`:`" used.
+
+Example:
+
+I have account files named `order-12345.txt` with format:
+```text
+username:password:email:email password:user_agent:cookies
+```
+
+Command to add accounts will be (user_agent column skiped with `_`):
+```sh
+twscrape add_accounts ./order-12345.txt username:password:email:email_password:_:cookies
+```
+
+### Login accounts
+
+_Note:_ If you added accounts with cookies, login not required.
+
+Run:
 
 ```sh
 twscrape login_accounts
 ```
 
-Accounts and their sessions will be saved, so they can be reused for future requests
+`twscrape` will start login flow for each new account. If X will ask to verify email and you provided `email_password` in `add_account`, then `twscrape` will try to receive verification code by IMAP protocol. After success login account cookies will be saved to db file for future use.
 
-Note: Possible to use `_` in `line_format` to skip some value
+#### Manual email verification
 
-### Add accounts with cookies
+In case your email provider not support IMAP protocol (ProtonMail, Tutanota, etc) or IMAP is disabled in settings, you can enter email verification code manually. To do this run login command with `--manual` flag.
 
-Use `cookies` param in `line_format`, e.g.:
+Example:
 
 ```sh
-twscrape add_accounts ./accounts.txt username:password:email:email_password:cookies
+twscrape login_accounts --manual
+twscrape relogin user1 user2 --manual
+twscrape relogin_failed --manual
 ```
-
-In this case login not required.
 
 ### Get list of accounts and their statuses
 
@@ -219,14 +234,18 @@ twscrape --db test-accounts.db <command>
 ```sh
 twscrape search "QUERY" --limit=20
 twscrape tweet_details TWEET_ID
+twscrape tweet_replies TWEET_ID --limit=20
 twscrape retweeters TWEET_ID --limit=20
 twscrape favoriters TWEET_ID --limit=20
 twscrape user_by_id USER_ID
 twscrape user_by_login USERNAME
-twscrape followers USER_ID --limit=20
 twscrape following USER_ID --limit=20
+twscrape followers USER_ID --limit=20
+twscrape verified_followers USER_ID --limit=20
+twscrape subscriptions USER_ID --limit=20
 twscrape user_tweets USER_ID --limit=20
 twscrape user_tweets_and_replies USER_ID --limit=20
+twscrape liked_tweets USER_ID --limit=20
 ```
 
 The default output is in the console (stdout), one document per line. So it can be redirected to the file.
@@ -240,6 +259,55 @@ By default, parsed data is returned. The original tweet responses can be retriev
 ```sh
 twscrape search "elon mask lang:es" --limit=20 --raw
 ```
+
+## Proxy
+
+There are few options to use proxies.
+
+1. You can add proxy per account
+
+```py
+proxy = "http://login:pass@example.com:8080"
+await api.pool.add_account("user4", "pass4", "u4@mail.com", "mail_pass4", proxy=proxy)
+```
+
+2. You can use global proxy for all accounts
+
+```py
+proxy = "http://login:pass@example.com:8080"
+api = API(proxy=proxy)
+doc = await api.user_by_login("elonmusk")
+```
+
+3. Use can set proxy with environemt variable `TWS_RPOXY`:
+
+```sh
+TWS_PROXY=socks5://user:pass@127.0.0.1:1080 twscrape user_by_login elonmusk
+```
+
+4. You can change proxy any time like:
+
+```py
+api.proxy = "socks5://user:pass@127.0.0.1:1080"
+doc = await api.user_by_login("elonmusk")  # new proxy will be used
+api.proxy = None
+doc = await api.user_by_login("elonmusk")  # no proxy used
+```
+
+5. Proxy priorities
+
+- `api.proxy` have top priority
+- `env.proxy` will be used if `api.proxy` is None
+- `acc.proxy` have lowest priotity
+
+So if you want to use proxy PER ACCOUNT, do NOT override proxy with env variable or by passing proxy param to API.
+
+_Note:_ If proxy not working, exception will be raised from API class.
+
+## Environment variables
+
+- `TWS_WAIT_EMAIL_CODE` – timeout for email verification code during login (default: `30`, in seconds)
+- `TWS_RAISE_WHEN_NO_ACCOUNT` – raise `NoAccountError` exception when no available accounts right now, instead of waiting for availability (default: `false`, possible value: `false` / `0` / `true` / `1`)
 
 ## Limitations
 

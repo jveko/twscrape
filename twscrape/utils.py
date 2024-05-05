@@ -1,12 +1,9 @@
 import base64
 import json
+import os
 from collections import defaultdict
 from datetime import datetime, timezone, date
 from typing import Any, AsyncGenerator, Callable, TypeVar
-
-from httpx import HTTPStatusError, Response
-
-from .logger import logger
 
 T = TypeVar("T")
 
@@ -30,14 +27,6 @@ async def gather(gen: AsyncGenerator[T, None], with_result=False) -> list[T]:
         if with_result:
             items.append(x)
     return items
-
-
-def raise_for_status(rep: Response, label: str):
-    try:
-        rep.raise_for_status()
-    except HTTPStatusError as e:
-        logger.warning(f"{label} - {rep.status_code} - {rep.text}")
-        raise e
 
 
 def encode_params(obj: dict):
@@ -234,3 +223,10 @@ def parse_cookies(val: str) -> dict[str, str]:
         pass
 
     raise ValueError(f"Invalid cookie value: {val}")
+
+
+def get_env_bool(key: str, default_val: bool = False) -> bool:
+    val = os.getenv(key)
+    if val is None:
+        return default_val
+    return val.lower() in ("1", "true", "yes")

@@ -17,7 +17,7 @@ async def worker(queue: asyncio.Queue, api: twscrape.API, args):
 
 
 async def main(args):
-    set_log_level("DEBUG")
+    print(args)
     with open('queries.txt', 'r') as file:
         lines = file.readlines()
     queries = [line.strip().lower() for line in lines]
@@ -36,9 +36,9 @@ async def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parser For Arguments",
                                      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--limit", dest="limit", default=40, help="Limit each workers", )
+    parser.add_argument("--limit", dest="limit", default=100000000, help="Limit each workers", )
     parser.add_argument("--with_result", dest="with_result", default=False, help="Return Result of Tweets", )
-    parser.add_argument("--workers", dest="workers", default=2, help="Workers", )
+    parser.add_argument("--workers", dest="workers", default=16, help="Workers", )
 
     args = parser.parse_args()
 
